@@ -1,0 +1,13 @@
+{
+  "name": "50prompt-salespage",
+  "version": "1.0.0",
+  "private": true,
+  "description": "50 Prompt Tạo Ảnh AI Phong Cách — Hanadola Media & Technology",
+  "dependencies": {
+    "@vercel/kv": "^1.0.1",
+    "resend": "^3.5.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
