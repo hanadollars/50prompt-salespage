@@ -1,124 +1,277 @@
-import { kv } from '@vercel/kv';
-import { Resend } from 'resend';
+// api/sepay-webhook.js — Gói 50 Prompt Tạo Ảnh AI Phong Cách
+// CommonJS – không cần npm packages ngoài
 
-const resend = new Resend(process.env.RESEND_API_KEY);
+const ORDER_CODE_REGEX = /50P[A-Z0-9]{4}/i;
+const EINVOICE_BASE = 'https://einvoice-api.sepay.vn';
+const PRICE = 149000;
 
-export default async function handler(req, res) {
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' });
+/* ── KV helpers (Upstash REST API) ── */
+async function kvGet(key) {
+  const r = await fetch(`${process.env.KV_REST_API_URL}/get/${key}`, {
+    headers: { Authorization: `Bearer ${process.env.KV_REST_API_TOKEN}` },
+  });
+  const data = await r.json();
+  return data.result;
+}
+async function kvSet(key, value, ex) {
+  await fetch(process.env.KV_REST_API_URL, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${process.env.KV_REST_API_TOKEN}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(['SET', key, value, 'EX', ex]),
+  });
+}
+async function kvIncr(key) {
+  const r = await fetch(process.env.KV_REST_API_URL, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${process.env.KV_REST_API_TOKEN}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(['INCR', key]),
+  });
+  const data = await r.json();
+  return data.result;
+}
+
+/* ── Resend email ── */
+async function sendEmail({ to, subject, html }) {
+  const fromEmail = process.env.FROM_EMAIL || 'no-reply@hanadola.com';
+  const r = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ from: fromEmail, to, subject, html }),
+  });
+  const text = await r.text();
+  console.log('[Resend] TO:', to, '| status:', r.status, '| resp:', text);
+}
+
+/* ── SePay eInvoice ── */
+async function createEInvoice({ order, transferAmount }) {
+  const clientId          = process.env.SEPAY_EINVOICE_CLIENT_ID;
+  const clientSecret      = process.env.SEPAY_EINVOICE_CLIENT_SECRET;
+  const providerAccountId = process.env.SEPAY_EINVOICE_PROVIDER_ACCOUNT_ID;
+  const templateCode      = process.env.SEPAY_EINVOICE_TEMPLATE_CODE;
+  const invoiceSeries     = process.env.SEPAY_EINVOICE_SERIES;
+
+  if (!clientId || !clientSecret || !providerAccountId) {
+    console.log('[eInvoice] Thiếu biến môi trường — bỏ qua');
+    return null;
   }
 
-  // Xác thực API key từ SePay
+  const basic = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
+  const tokenRes = await fetch(`${EINVOICE_BASE}/v1/token`, {
+    method: 'POST',
+    headers: { Authorization: `Basic ${basic}`, 'Content-Type': 'application/json' },
+  });
+  const tokenData = await tokenRes.json();
+  console.log('[eInvoice] Token resp:', tokenRes.status, JSON.stringify(tokenData));
+  const token = tokenData?.data?.access_token;
+  if (!token) return null;
+
+  const issuedDate = new Date().toISOString().replace('T', ' ').slice(0, 19);
+
+  const payload = {
+    template_code:        templateCode,
+    invoice_series:       invoiceSeries,
+    issued_date:          issuedDate,
+    currency:             'VND',
+    provider_account_id:  providerAccountId,
+    payment_method:       'CK',
+    buyer: { name: order.name, email: order.email },
+    items: [{
+      line_number: 1,
+      line_type:   1,
+      item_code:   '50P-001',
+      item_name:   'Gói 50 Prompt Tạo Ảnh AI Phong Cách — Tài liệu số',
+      unit:        'Gói',
+      quantity:    1,
+      unit_price:  transferAmount || PRICE,
+      tax_rate:    -2,
+    }],
+    is_draft:        false,
+    auto_send_buyer: true,
+  };
+
+  const invoiceRes = await fetch(`${EINVOICE_BASE}/v1/invoices/create`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const invoiceData = await invoiceRes.json();
+  console.log('[eInvoice] Create resp:', invoiceRes.status, JSON.stringify(invoiceData));
+
+  const data = invoiceData?.data || null;
+  if (!data) return null;
+
+  const trackingCode = data.tracking_code;
+  if (trackingCode) {
+    try {
+      const releaseRes = await fetch(`${EINVOICE_BASE}/v1/invoices/release`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tracking_codes: [trackingCode] }),
+      });
+      const releaseData = await releaseRes.json();
+      console.log('[eInvoice] Release resp:', releaseRes.status, JSON.stringify(releaseData));
+      if (releaseData?.data) Object.assign(data, releaseData.data);
+    } catch (err) {
+      console.error('[eInvoice] Release error:', err.message);
+    }
+  }
+
+  return data;
+}
+
+/* ── Webhook handler ── */
+module.exports = async function handler(req, res) {
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+
   const authHeader = req.headers['authorization'] || '';
-  const expectedKey = `Apikey ${process.env.SEPAY_API_KEY}`;
-  if (authHeader !== expectedKey) {
+  const expectedToken = process.env.SEPAY_API_KEY;
+  if (expectedToken && authHeader !== `Apikey ${expectedToken}`) {
+    console.warn('[Webhook] Auth thất bại:', authHeader);
     return res.status(401).json({ error: 'Unauthorized' });
   }
 
-  try {
-    const body = req.body;
-    const content = body.content || body.description || '';
-    
-    // Tìm mã đơn hàng trong nội dung chuyển khoản
-    const match = content.match(/50P[A-Z0-9]{4}/i);
-    if (!match) {
-      return res.status(200).json({ message: 'Không tìm thấy mã đơn hàng' });
-    }
+  const body = req.body || {};
+  console.log('[Webhook] Nhận:', JSON.stringify(body));
 
-    const orderCode = match[0].toUpperCase();
-    const orderRaw = await kv.get(`order:${orderCode}`);
+  const content = body.content || body.description || '';
+  const transferAmount = Number(body.transferAmount || body.amount || 0);
 
-    if (!orderRaw) {
-      return res.status(200).json({ message: 'Đơn hàng không tồn tại' });
-    }
-
-    const order = typeof orderRaw === 'string' ? JSON.parse(orderRaw) : orderRaw;
-
-    if (order.status === 'paid') {
-      return res.status(200).json({ message: 'Đơn hàng đã xử lý rồi' });
-    }
-
-    // Tạo số hóa đơn tự động
-    const invoiceCounter = await kv.incr('invoice_counter');
-    const invoiceNumber = `HD-2026-${String(invoiceCounter).padStart(4, '0')}`;
-
-    // Cập nhật trạng thái đơn hàng thành paid
-    order.status = 'paid';
-    order.paidAt = new Date().toISOString();
-    order.invoiceNumber = invoiceNumber;
-    await kv.set(`order:${orderCode}`, JSON.stringify(order), { ex: 172800 });
-
-    const ebookLink = process.env.EBOOK_LINK;
-    const fromEmail = process.env.FROM_EMAIL || 'noreply@hanadola.com';
-    const notifyEmail = process.env.NOTIFY_EMAIL;
-
-    // Email 1: Gửi ebook cho khách hàng
-    await resend.emails.send({
-      from: fromEmail,
-      to: order.email,
-      subject: `🎉 Cảm ơn bạn! Đây là link tải ebook 50 Prompt AI`,
-      html: `
-        <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px;">
-          <h2 style="color:#f97316;">Xin chào ${order.name}! 👋</h2>
-          <p>Thanh toán của bạn đã được xác nhận thành công.</p>
-          <p><strong>Mã đơn hàng:</strong> ${orderCode}</p>
-          <p><strong>Số tiền:</strong> 149.000₫</p>
-          <div style="text-align:center;margin:30px 0;">
-            <a href="${ebookLink}" 
-               style="background:#f97316;color:white;padding:15px 30px;border-radius:8px;text-decoration:none;font-size:16px;font-weight:bold;">
-              📥 TẢI EBOOK NGAY
-            </a>
-          </div>
-          <p style="color:#666;font-size:13px;">Link tải sẽ có hiệu lực trong 7 ngày. Nếu cần hỗ trợ, liên hệ: ${fromEmail}</p>
-        </div>
-      `
-    });
-
-    // Email 2: Hóa đơn điện tử
-    await resend.emails.send({
-      from: fromEmail,
-      to: order.email,
-      subject: `🧾 Hóa đơn ${invoiceNumber} - 50 Prompt AI Ebook`,
-      html: `
-        <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px;border:1px solid #ddd;border-radius:8px;">
-          <h2 style="color:#1e40af;text-align:center;">HÓA ĐƠN ĐIỆN TỬ</h2>
-          <p style="text-align:center;color:#666;">Số hóa đơn: <strong>${invoiceNumber}</strong></p>
-          <hr/>
-          <table style="width:100%;border-collapse:collapse;">
-            <tr><td style="padding:8px;color:#666;">Khách hàng:</td><td style="padding:8px;"><strong>${order.name}</strong></td></tr>
-            <tr><td style="padding:8px;color:#666;">Email:</td><td style="padding:8px;">${order.email}</td></tr>
-            <tr><td style="padding:8px;color:#666;">Ngày mua:</td><td style="padding:8px;">${new Date().toLocaleDateString('vi-VN')}</td></tr>
-            <tr><td style="padding:8px;color:#666;">Sản phẩm:</td><td style="padding:8px;">Ebook 50 Prompt AI</td></tr>
-            <tr style="background:#f3f4f6;"><td style="padding:8px;color:#666;">Thành tiền:</td><td style="padding:8px;"><strong style="color:#f97316;">149.000₫</strong></td></tr>
-          </table>
-          <hr/>
-          <p style="text-align:center;color:#666;font-size:12px;">Cảm ơn bạn đã mua hàng tại Hanadola!</p>
-        </div>
-      `
-    });
-
-    // Email 3: Thông báo admin
-    if (notifyEmail) {
-      await resend.emails.send({
-        from: fromEmail,
-        to: notifyEmail,
-        subject: `💰 Đơn hàng mới: ${orderCode} - 149.000₫`,
-        html: `
-          <p><strong>Đơn hàng mới thanh toán thành công!</strong></p>
-          <p>Mã đơn: ${orderCode}</p>
-          <p>Khách hàng: ${order.name}</p>
-          <p>Email: ${order.email}</p>
-          <p>Số tiền: 149.000₫</p>
-          <p>Thời gian: ${new Date().toLocaleString('vi-VN')}</p>
-          <p>Hóa đơn: ${invoiceNumber}</p>
-        `
-      });
-    }
-
-    return res.status(200).json({ success: true, invoiceNumber });
-
-  } catch (error) {
-    console.error('Webhook error:', error);
-    return res.status(500).json({ error: 'Lỗi xử lý webhook' });
+  const match = content.match(ORDER_CODE_REGEX);
+  if (!match) {
+    console.log('[Webhook] Không tìm thấy mã 50P trong:', content);
+    return res.status(200).json({ success: false, message: 'Không tìm thấy mã đơn hàng' });
   }
-}
+
+  const orderCode = match[0].toUpperCase();
+  console.log('[Webhook] Mã đơn:', orderCode, '| Số tiền:', transferAmount);
+
+  const raw = await kvGet(`order:${orderCode}`);
+  if (!raw) {
+    console.warn('[Webhook] Không tìm thấy đơn:', orderCode);
+    return res.status(200).json({ success: false, message: 'Không tìm thấy đơn hàng' });
+  }
+
+  const order = typeof raw === 'string' ? JSON.parse(raw) : raw;
+
+  if (transferAmount < PRICE) {
+    console.warn('[Webhook] Số tiền không đủ:', transferAmount, '< PRICE:', PRICE);
+    return res.status(200).json({ success: false, message: 'Số tiền không đủ' });
+  }
+
+  if (order.status === 'paid') {
+    console.log('[Webhook] Đơn đã thanh toán trước đó:', orderCode);
+    return res.status(200).json({ success: true, message: 'Đã xử lý trước đó' });
+  }
+
+  const paidAt = new Date().toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' });
+  const fileUrl = process.env.FILE_URL || '#';
+
+  order.status = 'paid';
+  order.paidAt = paidAt;
+  order.transferAmount = transferAmount;
+  order.fileUrl = fileUrl;
+  await kvSet(`order:${orderCode}`, JSON.stringify(order), 86400 * 30);
+
+  const counter = await kvIncr('p50_invoice_counter');
+  const invoiceNumber = `HD-50P-2026-${String(counter).padStart(4, '0')}`;
+
+  // eInvoice
+  let einvoiceData = null;
+  let invoiceViewUrl = null;
+  try {
+    einvoiceData = await createEInvoice({ order, transferAmount });
+    if (einvoiceData) {
+      order.invoiceTrackingCode = einvoiceData.tracking_code || null;
+      order.invoiceNumber = invoiceNumber;
+      invoiceViewUrl = einvoiceData.view_url || einvoiceData.pdf_url || einvoiceData.download_url || null;
+      if (invoiceViewUrl) order.invoiceViewUrl = invoiceViewUrl;
+      await kvSet(`order:${orderCode}`, JSON.stringify(order), 86400 * 30);
+      console.log('[eInvoice] ✅ tracking_code:', einvoiceData.tracking_code, '| view_url:', invoiceViewUrl);
+    }
+  } catch (err) {
+    console.error('[eInvoice] ❌ Lỗi:', err.message);
+  }
+
+  const amountFormatted = (transferAmount || PRICE).toLocaleString('vi-VN') + ' ₫';
+
+  // Email khách hàng
+  try {
+    await sendEmail({
+      to: order.email,
+      subject: `✅ Thanh toán thành công — Gói 50 Prompt Tạo Ảnh AI`,
+      html: `<!DOCTYPE html><html lang="vi"><head><meta charset="UTF-8"><style>
+body{font-family:'Segoe UI',Arial,sans-serif;background:#0F0A1E;color:#F0EEFF;margin:0;padding:0}
+.wrap{max-width:520px;margin:0 auto;padding:40px 24px}
+.brand{font-size:10px;letter-spacing:3px;color:rgba(180,130,255,0.5);text-transform:uppercase;margin-bottom:28px}
+h1{font-size:22px;font-weight:300;margin-bottom:6px;color:#F0EEFF}
+h1 em{font-style:italic;color:#C084FC}
+p{font-size:14px;color:rgba(240,238,255,0.6);line-height:1.8;margin-bottom:14px}
+.box{background:rgba(255,255,255,0.04);border:1px solid rgba(180,130,255,0.2);border-radius:8px;padding:20px 24px;margin:20px 0}
+.box-row{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.04);font-size:13px}
+.box-row:last-child{border-bottom:none}
+.box-label{color:rgba(240,238,255,0.4)}
+.box-val{color:#F0EEFF;font-weight:500}
+.inv{color:#C084FC;font-weight:700}
+.btn{display:block;background:linear-gradient(135deg,#9333EA,#C084FC);color:#fff;text-align:center;padding:16px;border-radius:6px;font-size:15px;font-weight:700;text-decoration:none;margin:24px 0;letter-spacing:.5px}
+.note{font-size:11px;color:rgba(180,130,255,0.5);line-height:1.7}
+.footer{margin-top:32px;padding-top:16px;border-top:1px solid rgba(255,255,255,0.06);font-size:11px;color:rgba(180,130,255,0.3);text-align:center}
+</style></head><body><div class="wrap">
+<div class="brand">Hanadola Media &amp; Technology · AI Tools</div>
+<h1>Cảm ơn bạn, <em>${order.name}</em>!</h1>
+<p>Thanh toán đã được xác nhận. Gói 50 Prompt của bạn đã sẵn sàng bên dưới.</p>
+<div class="box">
+  <div class="box-row"><span class="box-label">Sản phẩm</span><span class="box-val">Gói 50 Prompt Tạo Ảnh AI</span></div>
+  <div class="box-row"><span class="box-label">Mã đơn hàng</span><span class="box-val">${orderCode}</span></div>
+  <div class="box-row"><span class="box-label">Số hóa đơn</span><span class="box-val inv">${invoiceNumber}</span></div>
+  <div class="box-row"><span class="box-label">Số tiền</span><span class="box-val">${amountFormatted}</span></div>
+  <div class="box-row"><span class="box-label">Thanh toán lúc</span><span class="box-val">${paidAt}</span></div>
+</div>
+<a href="${fileUrl}" class="btn">📥 Nhận Gói 50 Prompt Ngay</a>
+${invoiceViewUrl ? `<a href="${invoiceViewUrl}" style="display:block;text-align:center;margin:-12px 0 24px;font-size:13px;color:#C084FC;text-decoration:underline">📄 Xem / Tải hóa đơn VAT điện tử</a>` : ''}
+<p class="note">
+  🔒 Tài liệu được cấp phép cá nhân. Vui lòng không chia sẻ hoặc phân phối lại.<br>
+  Cần hỗ trợ: <strong style="color:#F0EEFF">admin@hanadola.com</strong>
+</p>
+<div class="footer">© 2026 Công ty TNHH Hanadola Media &amp; Technology<br>P903, Tầng 9, Diamond Plaza, 34 Lê Duẩn, TP.HCM · MST: 0319352856</div>
+</div></body></html>`,
+    });
+  } catch (err) {
+    console.error('[Email] Lỗi gửi email khách:', err.message);
+  }
+
+  // Email admin
+  const notifyEmail = process.env.NOTIFY_EMAIL;
+  if (notifyEmail) {
+    try {
+      await sendEmail({
+        to: notifyEmail,
+        subject: `[50P] Đơn hàng mới — ${orderCode} — ${order.name}`,
+        html: `<div style="font-family:'Segoe UI',sans-serif;max-width:480px;padding:24px;background:#0F0A1E;color:#F0EEFF;border-radius:8px">
+<h2 style="color:#C084FC;font-size:18px;margin-bottom:16px">💰 Đơn hàng mới — Gói 50 Prompt AI</h2>
+<table style="width:100%;border-collapse:collapse;font-size:13px">
+  <tr><td style="padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.06);color:rgba(240,238,255,0.5);width:40%">Khách hàng</td><td style="padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.06);font-weight:600">${order.name}</td></tr>
+  <tr><td style="padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.06);color:rgba(240,238,255,0.5)">Email</td><td style="padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.06)">${order.email}</td></tr>
+  ${order.phone ? `<tr><td style="padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.06);color:rgba(240,238,255,0.5)">Điện thoại</td><td style="padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.06)">${order.phone}</td></tr>` : ''}
+  <tr><td style="padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.06);color:rgba(240,238,255,0.5)">Mã đơn</td><td style="padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.06);color:#C084FC;font-weight:600">${orderCode}</td></tr>
+  <tr><td style="padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.06);color:rgba(240,238,255,0.5)">Số hóa đơn</td><td style="padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.06);color:#C084FC">${invoiceNumber}</td></tr>
+  <tr><td style="padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.06);color:rgba(240,238,255,0.5)">Số tiền</td><td style="padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.06)">${amountFormatted}</td></tr>
+  <tr><td style="padding:8px 0;color:rgba(240,238,255,0.5)">Thanh toán lúc</td><td style="padding:8px 0">${paidAt}</td></tr>
+</table>
+</div>`,
+      });
+    } catch (err) {
+      console.error('[Email] Lỗi gửi admin:', err.message);
+    }
+  }
+
+  return res.status(200).json({ success: true, orderCode, invoiceNumber });
+};
