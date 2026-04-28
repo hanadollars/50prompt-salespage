@@ -1,38 +1,38 @@
-import { kv } from '@vercel/kv';
+// api/check-payment.js — 50Prompt
+// CommonJS – không cần npm packages
 
-export default async function handler(req, res) {
-  if (req.method !== 'GET') {
-    return res.status(405).json({ error: 'Method not allowed' });
-  }
+async function kvGet(key) {
+  const r = await fetch(`${process.env.KV_REST_API_URL}/get/${key}`, {
+    headers: { Authorization: `Bearer ${process.env.KV_REST_API_TOKEN}` },
+  });
+  const data = await r.json();
+  return data.result;
+}
+
+module.exports = async function handler(req, res) {
+  if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
+
+  const orderCode = req.query.code || req.query.orderCode;
+  if (!orderCode) return res.status(400).json({ error: 'Thiếu mã đơn hàng' });
 
   try {
-    const { orderCode } = req.query;
+    const raw = await kvGet(`order:${orderCode}`);
+    if (!raw) return res.status(404).json({ error: 'Không tìm thấy đơn hàng' });
 
-    if (!orderCode) {
-      return res.status(400).json({ error: 'Thiếu mã đơn hàng' });
-    }
-
-    const orderRaw = await kv.get(`order:${orderCode}`);
-
-    if (!orderRaw) {
-      return res.status(404).json({ error: 'Không tìm thấy đơn hàng' });
-    }
-
-    const order = typeof orderRaw === 'string' ? JSON.parse(orderRaw) : orderRaw;
+    const order = typeof raw === 'string' ? JSON.parse(raw) : raw;
 
     if (order.status === 'paid') {
       return res.status(200).json({
         status: 'paid',
-        ebookLink: process.env.EBOOK_LINK,
-        orderCode: order.code,
-        name: order.name
+        fileUrl: order.fileUrl || process.env.FILE_URL || '#',
+        orderCode,
+        name: order.name,
       });
     }
 
     return res.status(200).json({ status: 'pending' });
-
-  } catch (error) {
-    console.error('Check payment error:', error);
-    return res.status(500).json({ error: 'Lỗi kiểm tra thanh toán' });
+  } catch (err) {
+    console.error('[check-payment] Lỗi:', err.message);
+    return res.status(500).json({ error: 'Lỗi hệ thống' });
   }
-}
+};
