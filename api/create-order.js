@@ -1,18 +1,29 @@
-import { kv } from '@vercel/kv';
+// api/create-order.js — 50Prompt
+// CommonJS – không cần npm packages
 
-export default async function handler(req, res) {
+async function kvSet(key, value, ex) {
+  await fetch(process.env.KV_REST_API_URL, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${process.env.KV_REST_API_TOKEN}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(['SET', key, value, 'EX', ex]),
+  });
+}
+
+module.exports = async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
   try {
-    const { name, email } = req.body;
+    const { name, email, phone } = req.body;
 
     if (!name || !email) {
       return res.status(400).json({ error: 'Thiếu thông tin khách hàng' });
     }
 
-    // Tạo mã đơn hàng ngẫu nhiên: 50P + 4 ký tự
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
     let code = '50P';
     for (let i = 0; i < 4; i++) {
@@ -23,15 +34,14 @@ export default async function handler(req, res) {
       code,
       name,
       email,
+      phone: phone || '',
       amount: 149000,
       status: 'pending',
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
     };
 
-    // Lưu vào Vercel KV với thời hạn 48 giờ
-    await kv.set(`order:${code}`, JSON.stringify(orderData), { ex: 172800 });
+    await kvSet(`order:${code}`, JSON.stringify(orderData), 172800);
 
-    // Tạo VietQR URL cho ACB
     const acbAccount = process.env.ACB_ACCOUNT;
     const accountName = encodeURIComponent(process.env.ACCOUNT_NAME || 'HANADOLA');
     const description = encodeURIComponent(`Thanh toan ${code}`);
@@ -41,11 +51,10 @@ export default async function handler(req, res) {
       success: true,
       orderCode: code,
       qrUrl,
-      amount: 149000
+      amount: 149000,
     });
-
   } catch (error) {
     console.error('Create order error:', error);
     return res.status(500).json({ error: 'Lỗi tạo đơn hàng' });
   }
-}
+};
