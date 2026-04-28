@@ -683,7 +683,7 @@ footer a{color:var(--pink);text-decoration:none}
         <p>Để nhận ebook &amp; hóa đơn điện tử qua email</p>
       </div>
       <div class="form-group"><label>Họ và tên *</label><input type="text" id="fName" placeholder="Nguyễn Văn A" autocomplete="name"></div>
-      <div class="form-group"><label>Email nhận ebook *</label><input type="email" id="fEmail" placeholder="email@gmail.com" autocomplete="email"></div>
+      <div class="form-group"><label>Email nhận tài liệu *</label><input type="email" id="fEmail" placeholder="email@gmail.com" autocomplete="email"></div>
       <div class="form-group"><label>Số điện thoại (tùy chọn)</label><input type="tel" id="fPhone" placeholder="0901234567" autocomplete="tel"></div>
       <div class="note-box" style="margin-bottom:18px">
         <strong>📌 Lưu ý:</strong> Ebook PDF &amp; Hóa đơn điện tử sẽ tự động gửi về email của bạn ngay sau khi thanh toán thành công.
@@ -740,13 +740,13 @@ footer a{color:var(--pink);text-decoration:none}
         <div class="success-title">Thanh toán thành công!</div>
         <div class="success-desc">
           Hệ thống đã xác nhận giao dịch của bạn.<br>
-          Nhấn bên dưới để tải ebook ngay — email &amp; hóa đơn cũng đã gửi về hộp thư.
+          Nhấn bên dưới để nhận gói prompt ngay — email &amp; hóa đơn cũng đã gửi về hộp thư.
         </div>
         <div class="download-card">
-          <p>📥 File PDF 50 Prompt AI — Sẵn sàng tải về</p>
+          <p>📥 Gói 50 Prompt AI — Sẵn sàng nhận</p>
           <a id="dlLink" href="#" target="_blank" rel="noopener" class="btn-download">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-            Tải eBook PDF ngay
+            Nhận Gói 50 Prompt Ngay
           </a>
         </div>
         <div class="info-note">
@@ -863,7 +863,7 @@ function startPolling(orderCode){
       if(data.status === 'paid'){
         stopPolling();
         // Hiện link tải
-        document.getElementById('dlLink').href = data.ebookLink || '#';
+        document.getElementById('dlLink').href = data.fileUrl || '#';
         goStep(2);
       }
     } catch(e){
