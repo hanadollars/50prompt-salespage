@@ -52,6 +52,9 @@ module.exports = async function handler(req, res) {
       orderCode: code,
       qrUrl,
       amount: 149000,
+      account: acbAccount,
+      accountName: process.env.ACCOUNT_NAME || 'HANADOLA',
+      description: `Thanh toan ${code}`,
     });
   } catch (error) {
     console.error('Create order error:', error);
