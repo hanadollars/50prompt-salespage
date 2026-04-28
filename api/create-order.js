@@ -47,14 +47,16 @@ module.exports = async function handler(req, res) {
     const description = encodeURIComponent(`Thanh toan ${code}`);
     const qrUrl = `https://img.vietqr.io/image/ACB-${acbAccount}-compact2.png?amount=149000&addInfo=${description}&accountName=${accountName}`;
 
-    return res.status(200).json({
+       return res.status(200).json({
       success: true,
       orderCode: code,
       qrUrl,
       amount: 149000,
-      account: acbAccount,
-      accountName: process.env.ACCOUNT_NAME || 'HANADOLA',
-      description: `Thanh toan ${code}`,
+      bankInfo: {
+        account: acbAccount,
+        name: process.env.ACCOUNT_NAME || 'HANADOLA',
+      },
+      content: `Thanh toan ${code}`,
     });
   } catch (error) {
     console.error('Create order error:', error);
